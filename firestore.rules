@@ -1,0 +1,68 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(reportId) {
+      return request.auth != null && request.auth.uid == reportId;
+    }
+    function validReport(d) {
+      return d.keys().hasOnly([
+        'type', 'area', 'details', 'latE2', 'lngE2', 'precision',
+        'status', 'createdAt', 'updatedAt'
+      ])
+      && d.keys().hasAll([
+        'type', 'area', 'details', 'latE2', 'lngE2', 'precision',
+        'status', 'createdAt', 'updatedAt'
+      ])
+      && d.type in ['medica', 'agua', 'alimentos', 'refugio', 'rescate', 'otra']
+      && d.area in [
+        'Chitré, Herrera', 'Las Tablas, Los Santos', 'Santiago, Veraguas',
+        'Aguadulce, Coclé', 'Penonomé, Coclé', 'Ciudad de Panamá, Panamá',
+        'Arraiján, Panamá Oeste', 'La Chorrera, Panamá Oeste', 'Colón, Colón',
+        'David, Chiriquí', 'Boquete, Chiriquí', 'Bocas del Toro, Bocas del Toro',
+        'Changuinola, Bocas del Toro', 'La Palma, Darién'
+      ]
+      && d.details is string && d.details.size() >= 10 && d.details.size() <= 160
+      // Enteros en centésimas: las reglas impiden almacenar GPS preciso.
+      && d.latE2 is int && d.latE2 >= 700 && d.latE2 <= 1000
+      && d.lngE2 is int && d.lngE2 >= -8350 && d.lngE2 <= -7700
+      && d.precision in ['gps-approx', 'area-center']
+      && d.status == 'active'
+      && d.createdAt == request.time
+      && d.updatedAt == request.time;
+    }
+    match /reportFlags/{flagId} {
+      // Un señalamiento por navegador anónimo y reporte. Solo el equipo lo ve en Console.
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['reportId', 'reason', 'createdAt'])
+        && request.resource.data.reportId is string
+        && request.resource.data.reason == 'community-review'
+        && request.resource.data.createdAt == request.time
+        && flagId == request.resource.data.reportId + '_' + request.auth.uid
+        && request.auth.uid != request.resource.data.reportId
+        && exists(/databases/$(database)/documents/reports/$(request.resource.data.reportId))
+        && get(/databases/$(database)/documents/reports/$(request.resource.data.reportId)).data.status == 'active';
+      allow read, update, delete: if false;
+    }
+    match /reports/{reportId} {
+      // Los reportes no contienen nombres, teléfonos ni ubicación precisa.
+      allow get, list: if true;
+      // Una señal por identidad anónima. No se puede falsificar otro ID.
+      allow create: if isOwner(reportId) && validReport(request.resource.data);
+      // El propietario puede cerrar inmediatamente su propia señal.
+      allow update: if isOwner(reportId) && (
+        (resource.data.status == 'active'
+         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','updatedAt'])
+         && request.resource.data.status == 'resolved'
+         && request.resource.data.updatedAt == request.time)
+        ||
+        // Otra señal solo si la anterior está resuelta desde hace 10 minutos.
+        (resource.data.status == 'resolved'
+         && request.time > resource.data.updatedAt + duration.value(10, 'm')
+         && validReport(request.resource.data))
+      );
+      // Borrado solo desde consola de Firebase (administrador del proyecto).
+      allow delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
